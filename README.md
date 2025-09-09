@@ -1,7 +1,4 @@
 # Chicago-Rideshare-Event-Study
-## Introduction
-This project measures how rideshare demand, pricing, and traveler behavior shift around two 2024 soccer matches at Soldier Field: **Chicago Fire vs Inter Miami (Aug 31, 2024; kickoff 7:30 PM CT)** and **Mexico vs Bolivia (May 31, 2024; kickoff 8:00 PM CT)**. Using the City of Chicago Transportation Network Provider (TNP) dataset (2023–2024), we ingest trip start/end times, pickup/drop-off locations, fares, and durations for trips touching Community Area 33 (Soldier Field). We construct event windows that capture **arrivals** (hours before kickoff, with a small post-kick allowance) and **departures** (around the estimated final whistle through hours after), then build **matched baselines** (±1–4 weeks, same weekday and clock time). With these, we answer three questions: **(1)** How do fares and ride volumes change before, during, and after the matches? **(2)** When do peaks occur, and where are they concentrated? **(3)** How do speeds (a proxy for congestion/wait) respond? Outputs include 15-minute demand curves (event vs. baseline), spatial heatmaps, and indices such as fare-per-mile surge, trip-lift percentages, and speed deltas—providing actionable insight on staging zones, pricing expectations, and communications for future large events.
-
 ## Contents
 - [Introduction](#introduction)
 - [Overview](#overview)
@@ -13,7 +10,9 @@ This project measures how rideshare demand, pricing, and traveler behavior shift
   - [Fetch one event window (hour-chunked, robust)](#fetch-one-event-window-hour-chunked-robust)
 - [Outputs](#outputs)
 - [License](#license)
-  
+
+## Introduction
+This project measures how rideshare demand, pricing, and traveler behavior shift around two 2024 soccer matches at Soldier Field: **Chicago Fire vs Inter Miami (Aug 31, 2024; kickoff 7:30 PM CT)** and **Mexico vs Bolivia (May 31, 2024; kickoff 8:00 PM CT)**. Using the City of Chicago Transportation Network Provider (TNP) dataset (2023–2024), we ingest trip start/end times, pickup/drop-off locations, fares, and durations for trips touching Community Area 33 (Soldier Field). We construct event windows that capture **arrivals** (hours before kickoff, with a small post-kick allowance) and **departures** (around the estimated final whistle through hours after), then build **matched baselines** (±1–4 weeks, same weekday and clock time). With these, we answer three questions: **(1)** How do fares and ride volumes change before, during, and after the matches? **(2)** When do peaks occur, and where are they concentrated? **(3)** How do speeds (a proxy for congestion/wait) respond? Outputs include 15-minute demand curves (event vs. baseline), spatial heatmaps, and indices such as fare-per-mile surge, trip-lift percentages, and speed deltas—providing actionable insight on staging zones, pricing expectations, and communications for future large events.
 
 ## Overview
 This repo quantifies how large events affect rideshare activity near Soldier Field:
@@ -76,6 +75,7 @@ Notes:
    from sodapy import Socrata
    from requests.exceptions import ReadTimeout, ConnectionError
    ```
+
 6. Connect to the Chicago Open Data API
    ```python
    DOMAIN  = "data.cityofchicago.org"
@@ -88,6 +88,7 @@ Notes:
 - If not set, the client still works for public datasets, but with lower rate limits.
 - `timeout=300`: Allows up to 300 seconds per request to accommodate large queries or slow responses.
 
+ ## Filter, Load, and Extract the Data
 7. Choose the slice of data relevant to the analysis
    ```python
    CA = 33          # Soldier Field’s Community Area (Near South Side)
@@ -143,25 +144,26 @@ Notes:
     offset=offset,
     order=":id"
     )
-   ```
+    ```
 - Pulls one page of up to 50k rows that satisfy your filter.
 - `order=":id"` enforces a stable order across pages, preventing skips/duplicates while paginating.
 - On `ReadTimeout` / `ConnectionError`, it sleeps 1s and retries the same page once.
 
-###Control flow:
+### Control flow:
 - Stop when batch is empty (if not batch: break).
 - Accumulate with rows.extend(batch).
 - Advance the window: `offset += PAGE_SIZE`.
 - Print progress: either `offset/total` (capped with `min(offset, total))` or just offset if total is unknown.
 
 12. Building a dataframe
-  ```python
-  df = pd.DataFrame.from_records(rows)
-  ```
+    ```python
+    df = pd.DataFrame.from_records(rows)
+    ```
+    
 - Turns the list of dicts (each record = one trip) into a tabular `DataFrame`.
-- 
- 13. Enforce “touches CA 33” client-side (belt & suspenders)
-  ```python
+
+13. Enforce “touches CA 33” client-side (belt & suspenders)
+```python
   for ca_col in ("pickup_community_area", "dropoff_community_area"):
     df[ca_col] = pd.to_numeric(df[ca_col], errors="coerce")
 m_either = df["pickup_community_area"].eq(CA) | df["dropoff_community_area"].eq(CA)
@@ -170,14 +172,15 @@ if (~m_either).any():
 ```
 - Coerces CA columns to numeric so comparisons are reliable (`"33"` → 33, bad values → `NaN`).
 - Filters out any stragglers that don’t pick up or drop off in CA 33 (should be rare if the server-side filter worked perfectly).
+
 14. Parse timestamps as local wall-clock (naive)
-```python
+ ```python
 for col in ("trip_start_timestamp", "trip_end_timestamp"):
     s = pd.to_datetime(df[col], errors="coerce")  # no utc=True
     if getattr(s.dt, "tz", None) is not None:
         s = s.dt.tz_localize(None)
     df[col] = s
-```
+ ```
 
 - The dataset uses “Floating Timestamp” (local Chicago time without timezone).
 - Parsing as naive preserves the exact wall clock (e.g., 19:30 kickoff stays 19:30).
@@ -201,3 +204,168 @@ df["fare_per_mile"] = df["trip_total"] / df["trip_miles"]        # price intensi
     print(f"Rows fetched (CA {CA}, {YEAR}-{{{', '.join(map(str, MONTHS))}}}): {len(df):,} | Columns: {len(df.columns)}")
  ```
 - Prints the final row/column counts for your filtered pull (CA 33, selected 2024 months).
+
+ ## Event Windows & Segment Slicing (Arrivals vs Departures)
+
+**Goal:** From a pre-filtered `df` (CA=33, selected months), extract:
+- **Arrivals** → trips **dropping off in CA 33** with **END** times inside a pre-match window.  
+- **Departures** → trips **picking up in CA 33** with **START** times inside a post-match window.  
+Also build **±1..4 week** baseline windows (same weekday & clock time) for comparison.
+
+---
+
+###  Define matches (kickoffs as local-naive)
+
+```python
+EVENTS = [
+    {"name": "2024-08-31 Fire v Inter Miami (Soldier Field)", "kick": pd.Timestamp("2024-08-31 19:30")},
+    {"name": "2024-05-31 Mexico v Bolivia (Soldier Field)",   "kick": pd.Timestamp("2024-05-31 20:00")},
+]
+```
+### Segment timing parameters & window builder
+- Arrivals window: from `kickoff - PRE_H` - PAD_MIN` to `kickoff + LATE_ARRIVAL_MIN + PAD_MIN` (uses `END` times).
+- Departures window: from finalWhistle - EARLY_DEPART_MIN - PAD_MIN to `finalWhistle + POST_H + PAD_MIN` (uses START times).
+- `PAD_MIN=15` helps absorb the dataset’s 15-minute rounding.
+```python
+PRE_H  = 3   # hours before kickoff included in arrivals
+POST_H = 3   # hours after final whistle included in departures
+REG_MIN, HALFTIME_MIN, BUFFER_MIN = 90, 15, 5
+GAME_MIN = REG_MIN + HALFTIME_MIN + BUFFER_MIN  # ~110 min
+LATE_ARRIVAL_MIN = 20   # allow arrivals up to 20 min after kickoff
+EARLY_DEPART_MIN = 20   # allow departures up to 20 min before final whistle
+PAD_MIN = 15            # absorb dataset's 15-min rounding
+
+def flexible_bounds(kick_ts: pd.Timestamp,
+                    pre_h=PRE_H, post_h=POST_H,
+                    game_min=GAME_MIN,
+                    late_arrival_min=LATE_ARRIVAL_MIN,
+                    early_depart_min=EARLY_DEPART_MIN,
+                    pad_min=PAD_MIN):
+    # ensure naive (no tz)
+    if getattr(kick_ts, "tzinfo", None) is not None:
+        kick_ts = kick_ts.tz_localize(None)
+
+    pre_start  = kick_ts - pd.Timedelta(hours=pre_h) - pd.Timedelta(minutes=pad_min)
+    pre_end    = kick_ts + pd.Timedelta(minutes=late_arrival_min + pad_min)
+
+    post_start = (kick_ts + pd.Timedelta(minutes=game_min)
+                            - pd.Timedelta(minutes=early_depart_min + pad_min))
+    post_end   = (kick_ts + pd.Timedelta(minutes=game_min)
+                            + pd.Timedelta(hours=post_h, minutes=pad_min))
+
+    if pre_end >= post_start:
+        post_start = pre_end + pd.Timedelta(minutes=1)
+    return pre_start, pre_end, post_start, post_end
+
+def build_segment_baselines(kick_ts: pd.Timestamp, segment: str, weeks: int = 4):
+    """Return list of (start_ts, end_ts) windows for ±1..weeks weeks (same weekday/clock)."""
+    pre_start, pre_end, post_start, post_end = flexible_bounds(kick_ts)
+    s0, e0 = (pre_start, pre_end) if segment == "pre" else (post_start, post_end)
+    wins = []
+    for w in range(1, weeks+1):
+        for sign in (-1, +1):
+            delta = pd.Timedelta(days=7*w*sign)
+            wins.append((s0 + delta, e0 + delta))
+    return wins
+```
+### Segment slicers (event windows)
+
+- Arrivals: `dropoff_community_area == CA` AND `trip_end_timestamp` within arrivals window.
+- Departures: `pickup_community_area == CA` AND `trip_start_timestamp` within departures window.
+
+```python
+def slice_arrivals_event(df_in: pd.DataFrame, kick_ts: pd.Timestamp) -> pd.DataFrame:
+    """Arrivals: drop-offs in CA with END times in pre window (incl. late arrivals)."""
+    pre_start, pre_end, _, _ = flexible_bounds(kick_ts)
+    drop_ca = pd.to_numeric(df_in.get("dropoff_community_area"), errors="coerce")
+    mask = (drop_ca == CA) & df_in["trip_end_timestamp"].between(pre_start, pre_end, inclusive="both")
+    out = df_in.loc[mask].copy()
+    out["segment"] = "arrivals_pre"
+    out["segment_start_local"] = pre_start
+    out["segment_end_local"] = pre_end
+    return out
+
+def slice_departures_event(df_in: pd.DataFrame, kick_ts: pd.Timestamp) -> pd.DataFrame:
+    """Departures: pickups in CA with START times in post window (incl. early departures)."""
+    _, _, post_start, post_end = flexible_bounds(kick_ts)
+    pick_ca = pd.to_numeric(df_in.get("pickup_community_area"), errors="coerce")
+    mask = (pick_ca == CA) & df_in["trip_start_timestamp"].between(post_start, post_end, inclusive="both")
+    out = df_in.loc[mask].copy()
+    out["segment"] = "departures_post"
+    out["segment_start_local"] = post_start
+    out["segment_end_local"] = post_end
+    return out
+```
+### Baseline slicers (±1..4 weeks)
+```python
+def slice_arrivals_baselines(df_in: pd.DataFrame, kick_ts: pd.Timestamp, weeks=4) -> pd.DataFrame:
+    frames = []
+    drop_ca = pd.to_numeric(df_in.get("dropoff_community_area"), errors="coerce")
+    for s, e in build_segment_baselines(kick_ts, "pre", weeks=weeks):
+        m = (drop_ca == CA) & df_in["trip_end_timestamp"].between(s, e, inclusive="both")
+        part = df_in.loc[m].copy()
+        if not part.empty:
+            part["segment"] = "arrivals_pre"
+            part["segment_start_local"] = s
+            part["segment_end_local"] = e
+            frames.append(part)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+def slice_departures_baselines(df_in: pd.DataFrame, kick_ts: pd.Timestamp, weeks=4) -> pd.DataFrame:
+    frames = []
+    pick_ca = pd.to_numeric(df_in.get("pickup_community_area"), errors="coerce")
+    for s, e in build_segment_baselines(kick_ts, "post", weeks=weeks):
+        m = (pick_ca == CA) & df_in["trip_start_timestamp"].between(s, e, inclusive="both")
+        part = df_in.loc[m].copy()
+        if not part.empty:
+            part["segment"] = "departures_post"
+            part["segment_start_local"] = s
+            part["segment_end_local"] = e
+            frames.append(part)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+```
+
+### Build segments for each event & combine
+```python
+seg_event_frames, seg_baseline_frames = [], []
+
+for ev in EVENTS:
+    print(f"\n--- Segments for {ev['name']} ---")
+    dfe_arr = slice_arrivals_event(df, ev["kick"])
+    if not dfe_arr.empty:
+        dfe_arr["event_name"] = ev["name"]
+        dfe_arr["window_type"] = "event"
+        seg_event_frames.append(dfe_arr)
+        print(f"  Arrivals (event) rows: {len(dfe_arr):,}")
+    dfb_arr = slice_arrivals_baselines(df, ev["kick"], weeks=4)
+    if not dfb_arr.empty:
+        dfb_arr["event_name"] = ev["name"]
+        dfb_arr["window_type"] = "baseline"
+        seg_baseline_frames.append(dfb_arr)
+        print(f"  Arrivals (baseline) rows: {len(dfb_arr):,}")
+
+    dfe_dep = slice_departures_event(df, ev["kick"])
+    if not dfe_dep.empty:
+        dfe_dep["event_name"] = ev["name"]
+        dfe_dep["window_type"] = "event"
+        seg_event_frames.append(dfe_dep)
+        print(f"  Departures (event) rows: {len(dfe_dep):,}")
+    dfb_dep = slice_departures_baselines(df, ev["kick"], weeks=4)
+    if not dfb_dep.empty:
+        dfb_dep["event_name"] = ev["name"]
+        dfb_dep["window_type"] = "baseline"
+        seg_baseline_frames.append(dfb_dep)
+        print(f"  Departures (baseline) rows: {len(dfb_dep):,}")
+
+df_seg_events   = pd.concat(seg_event_frames, ignore_index=True) if seg_event_frames else pd.DataFrame()
+df_seg_baseline = pd.concat(seg_baseline_frames, ignore_index=True) if seg_baseline_frames else pd.DataFrame()
+
+print(f"\nSegment rows → events: {len(df_seg_events):,} | baselines: {len(df_seg_baseline):,}")
+```
+
+
+#### Notes
+- Arrivals use dropoffs & end times; departures use pickups & start times.
+- Windows include a 15-min pad to account for the dataset’s rounding to the nearest 15 minutes.
+- Baselines are drawn from the same weekday/clock time ±1..4 weeks around each event.
+  
