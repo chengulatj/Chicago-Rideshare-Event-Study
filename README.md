@@ -1,4 +1,4 @@
-# Chicago-Rideshare-Event-Study
+# Chicago Rideshare Event Study
 ## Contents
 - [Introduction](#introduction)
 - [Overview](#overview)
