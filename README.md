@@ -490,4 +490,110 @@ print("\n Segment summary (arrivals_pre / departures_post)")
 pd.set_option("display.max_columns", None)
 display(summary_seg)
 ```
-  
+### Findings (Segment Summary)
+---
+#### 1. Mexico v Bolivia (May 31, 2024, Soldier Field)
+- **Arrivals (before match):**
+  - Trips increased by **~42% vs baseline (avg window)**  
+  - Median fare per mile was **~12% higher** than usual  
+  - Median speed dropped by **~3 mph**, signaling heavier congestion  
+- **Departures (after match):**
+  - Trips spiked by **~51% vs baseline (avg window)**  
+  - Median fare per mile was **~21% higher**  
+  - Travel speeds again fell **~3.2 mph**, reinforcing congestion after the game  
+
+*Interpretation:* This game produced strong lifts both before and after the match. Departures were especially intense (**50%+ demand lift**).
+
+---
+
+#### 2. Fire v Inter Miami (Aug 31, 2024, Soldier Field)
+- **Arrivals (before match):**
+  - Trips rose by **~47% vs baseline (avg window)**  
+  - Median fare per mile rose **~9%**, a modest surge compared to Mexico v Bolivia  
+  - Speeds dropped by **~2.3 mph**, showing localized congestion  
+- **Departures (after match):**
+  - Trips increased by **~41% vs baseline (avg window)**  
+  - Median fare per mile rose **~24%**, indicating stronger price pressure than for arrivals  
+  - Speeds dropped by **~3.1 mph**, again showing congestion as fans left together  
+
+ *Interpretation:* The Inter Miami match produced balanced surges, but **price pressure was sharper during departures**.
+
+---
+
+### Key Takeaways
+- **Demand lift:** Both matches saw **40–50%+ more trips than baseline**, especially before and after the games  
+- **Price surge:** Price-per-mile increased across the board, with the **highest spikes (20–24%) during post-match departures**  
+- **Congestion:** Median speeds dropped consistently (**~2–3 mph**) during fan movement periods  
+- **Event dynamics:**  
+  - *Mexico v Bolivia* → Stronger **departure demand**  
+  - *Inter Miami* → More **balanced demand**, but **higher price pressure** post-match
+
+  ### Visualizations
+
+To better understand demand and price surges, we built a series of plots that show event vs. baseline rideshare activity around Soldier Field.  
+
+#### 1. Timestamp Curves (Trips per 15 Minutes)
+
+We group all trips into **15-minute bins** and compare:
+- **Event windows** (arrivals before kickoff, departures after the final whistle)  
+- **Baseline windows** (same time periods on non-event days, averaged over 4 weeks)  
+
+Each chart shows:
+- **Blue solid line** → Event trips  
+- **Red dashed line** → Baseline average  
+- **Vertical dashed line** → Kickoff (arrivals) or Final Whistle (departures)  
+- **Y-axis** → Number of trips  
+- **X-axis** → Local time (America/Chicago), labeled every 15 minutes  
+
+```python
+# Example plotting snippet
+fig, ax = plt.subplots(figsize=(10,5))
+ax.plot(ev_curve["ts"], ev_curve["trips"], label="Event", color=event_color, linewidth=2.5)
+ax.plot(bl_curve["ts"], bl_curve["trips_avg"], label="Baseline avg", color=baseline_color, linestyle="--", linewidth=2)
+ax.axvline(kickoff.floor("15min"), linestyle="--", color=marker_color, linewidth=1.5, label="Kickoff")
+stylize_time_axis(ax, title="Arrivals — Mexico v Bolivia", xlab="Local Time", ylab="Trips per 15 min")
+ax.legend(frameon=True, fancybox=True, shadow=True, loc="upper left")
+plt.tight_layout()
+plt.show()
+```
+#### Trip Lift Bar Chart
+
+We measure **trip lift** as the percentage increase in rides compared to the average baseline window.  
+This visualization highlights how demand before and after matches surged above normal levels.  
+
+#### Code Example
+
+```python
+# Trip lift % bar chart (thinner bars, custom labels)
+if not summary_seg.empty:
+    # Custom labels for (event_name, segment)
+    custom_labels = {
+        ("2024-08-31 Fire v Inter Miami (Soldier Field)", "arrivals_pre"): "Inter Miami — Arrivals",
+        ("2024-08-31 Fire v Inter Miami (Soldier Field)", "departures_post"): "Inter Miami — Departures",
+        ("2024-05-31 Mexico v Bolivia (Soldier Field)", "arrivals_pre"): "Mexico v Bolivia — Arrivals",
+        ("2024-05-31 Mexico v Bolivia (Soldier Field)", "departures_post"): "Mexico v Bolivia — Departures",
+    }
+
+    # Build plot dataframe
+    plot_df = summary_seg[["event_name","segment","trip_lift_pct_vs_avg_window"]].copy()
+    plot_df["label"] = plot_df.apply(
+        lambda row: custom_labels.get((row["event_name"], row["segment"])), axis=1
+    )
+
+    # Plot
+    x = np.arange(len(plot_df))
+    y = plot_df["trip_lift_pct_vs_avg_window"].values
+
+    fig, ax = plt.subplots(figsize=(8,7))
+    bars = ax.bar(x, y, width=0.3, color=event_color, alpha=0.85, edgecolor="black")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(plot_df["label"], rotation=45, ha="right")
+    ax.set_ylabel("Trip Lift (%)")
+    ax.set_title("Event Demand Lift at Soldier Field", fontsize=14, weight="bold")
+    ax.axhline(0, color="black", linewidth=0.8)
+
+    plt.tight_layout()
+    plt.show()
+```
+
