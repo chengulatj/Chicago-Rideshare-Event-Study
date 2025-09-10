@@ -208,7 +208,7 @@ for col in ("trip_start_timestamp", "trip_end_timestamp"):
 - The dataset uses “Floating Timestamp” (local Chicago time without timezone).
 - Parsing as naive preserves the exact wall clock (e.g., 19:30 kickoff stays 19:30).
 - Strips any stray timezone to avoid mixing tz-aware/naive datetimes (which breaks comparisons and binning).
-15. Coerce numerics & compute derived fields
+  ### Coerce numerics & compute derived fields
   ```python
   num_cols = [...]
   for c in num_cols:
@@ -571,7 +571,6 @@ Each chart shows:
 - **X-axis** → Local time (America/Chicago), labeled every 15 minutes  
 
 ```python
-# Example plotting snippet
 fig, ax = plt.subplots(figsize=(10,5))
 ax.plot(ev_curve["ts"], ev_curve["trips"], label="Event", color=event_color, linewidth=2.5)
 ax.plot(bl_curve["ts"], bl_curve["trips_avg"], label="Baseline avg", color=baseline_color, linestyle="--", linewidth=2)
@@ -589,7 +588,7 @@ This visualization highlights how demand before and after matches surged above n
 ### Code Example
 
 ```python
-# Trip lift % bar chart (thinner bars, custom labels)
+# Trip lift % 
 if not summary_seg.empty:
     # Custom labels for (event_name, segment)
     custom_labels = {
