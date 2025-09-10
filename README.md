@@ -3,13 +3,42 @@
 - [Introduction](#introduction)
 - [Overview](#overview)
 - [Data Source](#data-source)
-- [Quick Start (Colab)](#quick-start-colab)
+- [Event Windows & Zone](#event-windows--zone)
+- [Quick Start (Colab)](#1-quick-start-colab)
   - [Install dependencies](#install-dependencies)
-  - [Set a Socrata App Token (optional)](#set-a-socrata-app-token-optional)
-  - [Sanity-check sample](#sanity-check-sample)
-  - [Fetch one event window (hour-chunked, robust)](#fetch-one-event-window-hour-chunked-robust)
+  - [Set a Socrata App Token (optional)](#optional-set-a-socrata-app-token-for-higher-rate-limits)
+  - [Imports](#imports)
+  - [Connect to the Chicago Open Data API](#connect-to-the-chicago-open-data-api)
+- [Filter, Load, and Extract the Data](#2--filter-load-and-extract-the-data)
+  - [Choose the slice of data](#choose-the-slice-of-data-relevant-to-the-analysis)
+  - [Build the WHERE clause](#build-the-server-side-filter-soql-where-clause)
+  - [Pagination Setup](#pagination-setup)
+  - [Paged fetch loop](#paged-fetch-loop-stable-ordering)
+  - [Build DataFrame](#building-a-dataframe)
+  - [Enforce CA filter](#enforce-touches-ca-33-client-side-belt--suspenders)
+  - [Parse timestamps](#parse-timestamps-as-local-wall-clock-naive)
+  - [Numeric coercion & derived fields](#coerce-numerics--compute-derived-fields)
+  - [Final shape summary](#final-shape-summary)
+- [Event Windows & Segment Slicing](#3--event-windows--segment-slicing-arrivals-vs-departures)
+  - [Define matches](#define-matches-kickoffs-as-local-naive)
+  - [Segment timing parameters](#segment-timing-parameters--window-builder)
+  - [Segment slicers (events)](#segment-slicers-event-windows)
+  - [Baseline slicers](#baseline-slicers-1-to-4-weeks)
+  - [Build segments for each event](#4-build-segments-for-each-event--combine)
+- [Segment Summaries](#segment-summaries)
+  - [Event vs Baseline Stats](#what-it-does)
+  - [Key Indices](#key-indices-created)
+  - [Why it matters](#why-it-matters)
+- [Findings](#5-findings-segment-summary)
+  - [Mexico v Bolivia (May 31, 2024)](#1-mexico-v-bolivia-may-31-2024-soldier-field)
+  - [Fire v Inter Miami (Aug 31, 2024)](#2-fire-v-inter-miami-aug-31-2024-soldier-field)
+  - [Key Takeaways](#key-takeaways)
+- [Visualizations](#6--visualizations)
+  - [Timestamp Curves](#1-timestamp-curves-trips-per-15-minutes)
+  - [Trip Lift Bar Chart](#trip-lift-bar-chart)
 - [Outputs](#outputs)
 - [License](#license)
+
 
 ## Introduction
 This project measures how rideshare demand, pricing, and traveler behavior shift around two 2024 soccer matches at Soldier Field: **Chicago Fire vs Inter Miami (Aug 31, 2024; kickoff 7:30 PM CT)** and **Mexico vs Bolivia (May 31, 2024; kickoff 8:00 PM CT)**. Using the City of Chicago Transportation Network Provider (TNP) dataset (2023–2024), we ingest trip start/end times, pickup/drop-off locations, fares, and durations for trips touching Community Area 33 (Soldier Field). We construct event windows that capture **arrivals** (hours before kickoff, with a small post-kick allowance) and **departures** (around the estimated final whistle through hours after), then build **matched baselines** (±1–4 weeks, same weekday and clock time). With these, we answer three questions: **(1)** How do fares and ride volumes change before, during, and after the matches? **(2)** When do peaks occur, and where are they concentrated? **(3)** How do speeds (a proxy for congestion/wait) respond? Outputs include 15-minute demand curves (event vs. baseline), spatial heatmaps, and indices such as fare-per-mile surge, trip-lift percentages, and speed deltas—providing actionable insight on staging zones, pricing expectations, and communications for future large events.
@@ -23,8 +52,6 @@ This repo quantifies how large events affect rideshare activity near Soldier Fie
 
 Built to be robust against API timeouts via hour-chunked fetches. Easily adapted to other venues/events.
 
----
-
 ## Data Source
 - **Dataset:** Transportation Network Providers — Trips (2023–2024)  
 - **Portal:** https://data.cityofchicago.org/Transportation/Transportation-Network-Providers-Trips-2023-2024-/n26f-ihde/about_data  
@@ -35,8 +62,6 @@ Notes:
 - Timestamps are *floating* (local; no timezone) and rounded to **15 minutes**.
 - Fares rounded to nearest **$2.50**; tips to **$1.00**.
 - Some geographies outside the city are suppressed; community-area fields are Chicago-only.
-
----
 
 ## Event Windows & Zone
 - **Kickoffs (CT):**
@@ -49,18 +74,17 @@ Notes:
 
 ---
 
-## Quick Start (Colab)
-
-1. Open via the badge above (or start a new Colab notebook).
-2. Install dependencies:
+## 1. Quick Start (Colab)
+- Open via the badge above (or start a new Colab notebook).
+### Install dependencies:
    ```python
    !pip -q install pandas numpy sodapy python-dateutil pyarrow matplotlib
    ```
-3. (Optional) Set a Socrata App Token for higher rate limits
+### (Optional) Set a Socrata App Token for higher rate limits
    ```python
    %env CHICAGO_APP_TOKEN=your_socrata_app_token_here
    ```
-5. Imports
+### Imports
 - `pandas`, `numpy` — data wrangling and math
 - `matplotlib`, `matplotlib.dates` — plotting (including time axes)
 - `sodapy.Socrata` — Python client for the City of Chicago (Socrata) API
@@ -76,7 +100,7 @@ Notes:
    from requests.exceptions import ReadTimeout, ConnectionError
    ```
 
-6. Connect to the Chicago Open Data API
+### Connect to the Chicago Open Data API
    ```python
    DOMAIN  = "data.cityofchicago.org"
    DATASET = "n26f-ihde"   # Transportation Network Providers - Trips (2023-2024)
@@ -88,8 +112,8 @@ Notes:
 - If not set, the client still works for public datasets, but with lower rate limits.
 - `timeout=300`: Allows up to 300 seconds per request to accommodate large queries or slow responses.
 
- ## Filter, Load, and Extract the Data
-7. Choose the slice of data relevant to the analysis
+ ## 2.  Filter, Load, and Extract the Data
+### Choose the slice of data relevant to the analysis
    ```python
    CA = 33          # Soldier Field’s Community Area (Near South Side)
    YEAR = 2024
@@ -98,7 +122,7 @@ Notes:
    ```
 - You’ll analyze trips that touch Community Area 33 and occur in specific 2024 months (extra months to account for baseline analysis)
 
-8. Build the server-side filter (SoQL WHERE clause)
+### Build the server-side filter (SoQL WHERE clause)
    ```python
    WHERE_CA33 = f"(pickup_community_area = {CA} OR dropoff_community_area = {CA})"
    ```
@@ -119,23 +143,23 @@ Notes:
 - Creates the focus on arrivals and departures in the select months.
 - In practice, you will still do precise event-window slicing locally (before/after kickoff). This month filter just reduces API volume.
 
- ```python
- WHERE_FINAL = f"{WHERE_CA33} AND ({WHERE_TIME})"
- ```
+   ```python
+  WHERE_FINAL = f"{WHERE_CA33} AND ({WHERE_TIME})"
+   ```
 - Combines area and time filters: trips touching CA 33 and starting or ending in the specified months of 2024
-- 
-9. Pagination Setup
+
+### Pagination Setup
 - `PAGE_SIZE = 50_000` — ask Socrata for up to 50k rows per request (their max).
 - `rows, offset = [], 0` — an accumulator for pages, and the starting offset.
 
-10. Count for progress (Optional)
+### Count for progress (Optional)
     ```python
     total = int(client.get(DATASET, select="count(1)", where=WHERE_FINAL)[0]["count"])
     ```
 - Asks the API for a row count that match your WHERE_FINAL filter (CA 33 + month/year).
 - If it fails, `total = None` and you’ll still stream pages—just without a progress denominator.
   
-11. Paged fetch loop (stable ordering)
+### Paged fetch loop (stable ordering)
     ```python
     batch = client.get(
     DATASET,
@@ -149,20 +173,20 @@ Notes:
 - `order=":id"` enforces a stable order across pages, preventing skips/duplicates while paginating.
 - On `ReadTimeout` / `ConnectionError`, it sleeps 1s and retries the same page once.
 
-### Control flow:
+#### Control flow:
 - Stop when batch is empty (if not batch: break).
 - Accumulate with rows.extend(batch).
 - Advance the window: `offset += PAGE_SIZE`.
 - Print progress: either `offset/total` (capped with `min(offset, total))` or just offset if total is unknown.
 
-12. Building a dataframe
+### Building a dataframe
     ```python
     df = pd.DataFrame.from_records(rows)
     ```
     
 - Turns the list of dicts (each record = one trip) into a tabular `DataFrame`.
 
-13. Enforce “touches CA 33” client-side (belt & suspenders)
+### Enforce “touches CA 33” client-side (belt & suspenders)
 ```python
   for ca_col in ("pickup_community_area", "dropoff_community_area"):
     df[ca_col] = pd.to_numeric(df[ca_col], errors="coerce")
@@ -173,7 +197,7 @@ if (~m_either).any():
 - Coerces CA columns to numeric so comparisons are reliable (`"33"` → 33, bad values → `NaN`).
 - Filters out any stragglers that don’t pick up or drop off in CA 33 (should be rare if the server-side filter worked perfectly).
 
-14. Parse timestamps as local wall-clock (naive)
+### Parse timestamps as local wall-clock (naive)
  ```python
 for col in ("trip_start_timestamp", "trip_end_timestamp"):
     s = pd.to_datetime(df[col], errors="coerce")  # no utc=True
@@ -199,13 +223,13 @@ df["fare_per_mile"] = df["trip_total"] / df["trip_miles"]        # price intensi
 - `fare_per_mile` = total paid per mile.
 - Note: if `trip_seconds` or `trip_miles` are 0/NaN, results may be inf/NaN. (You can add guards later if needed.)
 
-16. Final shape summary
+### Final shape summary
  ```python
     print(f"Rows fetched (CA {CA}, {YEAR}-{{{', '.join(map(str, MONTHS))}}}): {len(df):,} | Columns: {len(df.columns)}")
  ```
 - Prints the final row/column counts for your filtered pull (CA 33, selected 2024 months).
 
- ## Event Windows & Segment Slicing (Arrivals vs Departures)
+ ## 3.  Event Windows & Segment Slicing (Arrivals vs Departures)
 
 **Goal:** From a pre-filtered `df` (CA=33, selected months), extract:
 - **Arrivals**: trips **dropping off in CA 33** with **END** times inside a pre-match window.  
@@ -214,7 +238,7 @@ Also build **±1..4 week** baseline windows (same weekday & clock time) for comp
 
 ---
 
-###  Define matches (kickoffs as local-naive)
+### Define matches (kickoffs as local-naive)
 
 ```python
 EVENTS = [
@@ -316,7 +340,7 @@ def slice_departures_event(df_in: pd.DataFrame, kick_ts: pd.Timestamp) -> pd.Dat
     out["segment_end_local"] = post_end
     return out
 ```
-### Baseline slicers (±1..4 weeks)
+### Baseline slicers (±1 to 4 weeks)
 ```python
 def slice_arrivals_baselines(df_in: pd.DataFrame, kick_ts: pd.Timestamp, weeks=4) -> pd.DataFrame:
     frames = []
@@ -345,7 +369,7 @@ def slice_departures_baselines(df_in: pd.DataFrame, kick_ts: pd.Timestamp, weeks
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 ```
 
-### Build segments for each event & combine
+### 4. Build segments for each event & combine
 
 This step takes the cleaned rideshare dataset and slices it into **event windows** and **baseline windows** for each match. The segmentation helps us isolate arrivals and departures linked to the game, and compare them against “normal” activity on nearby weeks.
 
@@ -490,9 +514,9 @@ print("\n Segment summary (arrivals_pre / departures_post)")
 pd.set_option("display.max_columns", None)
 display(summary_seg)
 ```
-### Findings (Segment Summary)
+## 5. Findings (Segment Summary)
 ---
-#### 1. Mexico v Bolivia (May 31, 2024, Soldier Field)
+### 1. Mexico v Bolivia (May 31, 2024, Soldier Field)
 - **Arrivals (before match):**
   - Trips increased by **~42% vs baseline (avg window)**  
   - Median fare per mile was **~12% higher** than usual  
@@ -506,7 +530,7 @@ display(summary_seg)
 
 ---
 
-#### 2. Fire v Inter Miami (Aug 31, 2024, Soldier Field)
+### 2. Fire v Inter Miami (Aug 31, 2024, Soldier Field)
 - **Arrivals (before match):**
   - Trips rose by **~47% vs baseline (avg window)**  
   - Median fare per mile rose **~9%**, a modest surge compared to Mexico v Bolivia  
@@ -527,12 +551,14 @@ display(summary_seg)
 - **Event dynamics:**  
   - *Mexico v Bolivia* → Stronger **departure demand**  
   - *Inter Miami* → More **balanced demand**, but **higher price pressure** post-match
+ 
+    ---
 
-  ### Visualizations
+  ## 6.  Visualizations
 
 To better understand demand and price surges, we built a series of plots that show event vs. baseline rideshare activity around Soldier Field.  
 
-#### 1. Timestamp Curves (Trips per 15 Minutes)
+### 1. Timestamp Curves (Trips per 15 Minutes)
 
 We group all trips into **15-minute bins** and compare:
 - **Event windows** (arrivals before kickoff, departures after the final whistle)  
@@ -556,12 +582,12 @@ ax.legend(frameon=True, fancybox=True, shadow=True, loc="upper left")
 plt.tight_layout()
 plt.show()
 ```
-#### Trip Lift Bar Chart
+### Trip Lift Bar Chart
 
 We measure **trip lift** as the percentage increase in rides compared to the average baseline window.  
 This visualization highlights how demand before and after matches surged above normal levels.  
 
-#### Code Example
+### Code Example
 
 ```python
 # Trip lift % bar chart (thinner bars, custom labels)
