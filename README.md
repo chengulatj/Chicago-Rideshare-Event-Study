@@ -233,7 +233,7 @@ df["fare_per_mile"] = df["trip_total"] / df["trip_miles"]        # price intensi
 **Goal:** From a pre-filtered `df` (CA=33, selected months), extract:
 - **Arrivals**: trips **dropping off in CA 33** with **END** times inside a pre-match window.  
 - **Departures**:  trips **picking up in CA 33** with **START** times inside a post-match window.  
-Also build **±1..4 week** baseline windows (same weekday & clock time) for comparison.
+Also build **±1 to 4 weeks** baseline windows (same weekday & clock time) for comparison.
 
 ---
 
@@ -426,7 +426,6 @@ print(f"\nSegment rows → events: {len(df_seg_events):,} | baselines: {len(df_s
 
 This section aggregates **event vs. baseline statistics** for arrivals and departures around each match.
 
-#### What it does
 1. **Summarize events and baselines**  
    - Groups trips by `event_name` and `segment` (`arrivals_pre`, `departures_post`).  
    - Computes median fare per mile, 75th percentile fare per mile, median speed (mph), and 25th percentile speed.  
@@ -513,7 +512,7 @@ print("\n Segment summary (arrivals_pre / departures_post)")
 pd.set_option("display.max_columns", None)
 display(summary_seg)
 ```
-## 5. Findings (Segment Summary)
+ 5. Findings (Segment Summary)
 ---
 ### 1. Mexico v Bolivia (May 31, 2024, Soldier Field)
 - **Arrivals (before match):**
@@ -553,8 +552,7 @@ display(summary_seg)
  
     ---
 
-  ## 6.  Visualizations
-
+## 6. VIsualizations
 To better understand demand and price surges, we built a series of plots that show event vs. baseline rideshare activity around Soldier Field.  
 
 ### 1. Timestamp Curves (Trips per 15 Minutes)
