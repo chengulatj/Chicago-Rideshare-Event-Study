@@ -208,8 +208,8 @@ df["fare_per_mile"] = df["trip_total"] / df["trip_miles"]        # price intensi
  ## Event Windows & Segment Slicing (Arrivals vs Departures)
 
 **Goal:** From a pre-filtered `df` (CA=33, selected months), extract:
-- **Arrivals** → trips **dropping off in CA 33** with **END** times inside a pre-match window.  
-- **Departures** → trips **picking up in CA 33** with **START** times inside a post-match window.  
+- **Arrivals**: trips **dropping off in CA 33** with **END** times inside a pre-match window.  
+- **Departures**:  trips **picking up in CA 33** with **START** times inside a post-match window.  
 Also build **±1..4 week** baseline windows (same weekday & clock time) for comparison.
 
 ---
@@ -228,13 +228,19 @@ EVENTS = [
 - `PAD_MIN=15` helps absorb the dataset’s 15-minute rounding.
 ```python
 PRE_H  = 3   # hours before kickoff included in arrivals
-POST_H = 3   # hours after final whistle included in departures
+POST_H = 1.5   # hours after final whistle included in departures
 REG_MIN, HALFTIME_MIN, BUFFER_MIN = 90, 15, 5
 GAME_MIN = REG_MIN + HALFTIME_MIN + BUFFER_MIN  # ~110 min
 LATE_ARRIVAL_MIN = 20   # allow arrivals up to 20 min after kickoff
 EARLY_DEPART_MIN = 20   # allow departures up to 20 min before final whistle
 PAD_MIN = 15            # absorb dataset's 15-min rounding
+```
+The function below calculates the time windows for:
+- Pre-match arrivals (before and slightly after kickoff).
+- Post-match departures (slightly before the game ends and several hours after).
+It makes the windows flexible enough to handle real-world quirks like people arriving late, leaving early, or timestamps being rounded
 
+```python
 def flexible_bounds(kick_ts: pd.Timestamp,
                     pre_h=PRE_H, post_h=POST_H,
                     game_min=GAME_MIN,
@@ -256,7 +262,12 @@ def flexible_bounds(kick_ts: pd.Timestamp,
     if pre_end >= post_start:
         post_start = pre_end + pd.Timedelta(minutes=1)
     return pre_start, pre_end, post_start, post_end
+```
+- `build_segment_baselines` creates baseline windows for comparison.
+- Instead of only looking at rides on the actual game day, we also want to look at the same time windows on nearby weeks (like 1 week before, 2 weeks after, etc.).
+- This gives us a “normal pattern” to compare against.
 
+```python
 def build_segment_baselines(kick_ts: pd.Timestamp, segment: str, weeks: int = 4):
     """Return list of (start_ts, end_ts) windows for ±1..weeks weeks (same weekday/clock)."""
     pre_start, pre_end, post_start, post_end = flexible_bounds(kick_ts)
@@ -268,6 +279,15 @@ def build_segment_baselines(kick_ts: pd.Timestamp, segment: str, weeks: int = 4)
             wins.append((s0 + delta, e0 + delta))
     return wins
 ```
+- `kick_ts`: kickoff time of the match.
+- `segment`: `"pre"` or `"post"` (are we building arrivals or departures baselines?).
+- `weeks`: how many weeks before and after to generate (default = 4).
+So if kickoff = Aug 31, 2024, 7:30 PM → it will generate baseline windows for:
+- Aug 24 (−1 week)
+- Sep 7 (+1 week)
+- Aug 17 (−2 weeks)
+- Sep 14 (+2 weeks) … up to 4 weeks.
+
 ### Segment slicers (event windows)
 
 - Arrivals: `dropoff_community_area == CA` AND `trip_end_timestamp` within arrivals window.
@@ -326,6 +346,23 @@ def slice_departures_baselines(df_in: pd.DataFrame, kick_ts: pd.Timestamp, weeks
 ```
 
 ### Build segments for each event & combine
+
+This step takes the cleaned rideshare dataset and slices it into **event windows** and **baseline windows** for each match. The segmentation helps us isolate arrivals and departures linked to the game, and compare them against “normal” activity on nearby weeks.
+
+#### Process
+- **Iterate over events**: Each event in the `EVENTS` list (e.g., Fire vs Inter Miami, Mexico vs Bolivia) is processed separately.  
+- **Arrivals (event)**: Trips that **end** in Soldier Field (CA 33) within the pre-match arrival window.  
+- **Arrivals (baseline)**: Trips that end in the same area/time slots on ±1…4 weeks around the event date.  
+- **Departures (event)**: Trips that **start** in Soldier Field (CA 33) within the post-match departure window.  
+- **Departures (baseline)**: Trips that start in the same area/time slots on ±1…4 weeks around the event date.  
+
+#### Outputs
+- **`df_seg_events`** → All event-day arrivals and departures (tagged by event name and window type).  
+- **`df_seg_baseline`** → All baseline arrivals and departures across comparison windows.  
+- **Row counts** are printed for transparency (e.g., how many arrivals vs. departures captured per event).  
+
+This segmentation sets the stage for calculating demand lifts, fare surges, and congestion metrics by directly comparing event-day trip patterns with matched baseline periods.
+
 ```python
 seg_event_frames, seg_baseline_frames = [], []
 
@@ -362,10 +399,95 @@ df_seg_baseline = pd.concat(seg_baseline_frames, ignore_index=True) if seg_basel
 
 print(f"\nSegment rows → events: {len(df_seg_events):,} | baselines: {len(df_seg_baseline):,}")
 ```
+### Segment Summaries
 
+This section aggregates **event vs. baseline statistics** for arrivals and departures around each match.
 
-#### Notes
-- Arrivals use dropoffs & end times; departures use pickups & start times.
-- Windows include a 15-min pad to account for the dataset’s rounding to the nearest 15 minutes.
-- Baselines are drawn from the same weekday/clock time ±1..4 weeks around each event.
+#### What it does
+1. **Summarize events and baselines**  
+   - Groups trips by `event_name` and `segment` (`arrivals_pre`, `departures_post`).  
+   - Computes median fare per mile, 75th percentile fare per mile, median speed (mph), and 25th percentile speed.  
+   - Labels whether the data came from an *event window* or a *baseline window*.
+
+2. **Merge event vs. baseline**  
+   - Combines event stats with baseline stats for direct comparison.  
+   - Ensures each segment (arrivals or departures) is aligned with its baseline.
+
+3. **Baseline window sizes**  
+   - Counts how many trips occurred in each baseline window.  
+   - Produces the **average** and **median** baseline window size to avoid distortions from very small samples.
+
+4. **Key indices created**
+   - `trips_multiplier`: Event trips ÷ Average baseline trips  
+   - `trip_lift_pct_vs_avg_window`: % lift in trips vs. baseline  
+   - `surge_index_fare_per_mile_med`: Fare-per-mile surge (event ÷ baseline)  
+   - `mph_change_med`: Change in median trip speed (event – baseline)  
+   - `trips_multiplier_vs_median_window`: Event trips ÷ Median baseline trips  
+   - `trip_lift_pct_vs_median_window`: % lift using median baseline instead of average
+
+#### Why it matters
+These metrics let us see:
+- **Demand lift**: How much more (or less) rideshare demand existed during the event window compared to normal weeks.  
+- **Price pressure**: Whether fares per mile surged during events.  
+- **Traffic effects**: Whether median speeds dropped, indicating congestion.  
+
+This gives a **quantitative basis** to evaluate how large-scale events (like soccer matches at Soldier Field) affect rideshare activity.
+
+```python
+# Segment summaries (keep which_event / which_baseline)
+def summarize_seg(df_in: pd.DataFrame, label: str) -> pd.DataFrame:
+    if df_in.empty:
+        return pd.DataFrame(columns=[
+            "event_name","segment","rows","med_fare_per_mile","p75_fare_per_mile","med_mph","p25_mph","which"
+        ])
+    g = (df_in.groupby(["event_name","segment"], as_index=False)
+               .agg(rows=("trip_id","count"),
+                    med_fare_per_mile=("fare_per_mile","median"),
+                    p75_fare_per_mile=("fare_per_mile", lambda x: x.quantile(0.75)),
+                    med_mph=("mph","median"),
+                    p25_mph=("mph", lambda x: x.quantile(0.25))))
+    g["which"] = label
+    return g
+
+ev_seg = summarize_seg(df_seg_events, "event")
+bl_seg = summarize_seg(df_seg_baseline, "baseline")
+
+summary_seg = ev_seg.merge(
+    bl_seg,
+    on=["event_name","segment"],
+    suffixes=("_event","_baseline"),
+    how="left"
+)
+
+# Baseline window sizes per segment (avoid tiny multipliers)
+bl_win_seg = (
+    df_seg_baseline.groupby(["event_name","segment","segment_start_local"], as_index=False)
+                   .agg(rows_baseline_win=("trip_id","count"))
+)
+bl_agg_seg = (
+    bl_win_seg.groupby(["event_name","segment"], as_index=False)
+              .agg(rows_baseline_avg_win=("rows_baseline_win","mean"),
+                   rows_baseline_median_win=("rows_baseline_win","median"),
+                   n_baseline_windows=("rows_baseline_win","size"))
+)
+summary_seg = summary_seg.merge(bl_agg_seg, on=["event_name","segment"], how="left")
+
+# Indices: multiplier vs AVG baseline window + percent lift
+summary_seg["trips_multiplier"] = summary_seg["rows_event"] / summary_seg["rows_baseline_avg_win"]
+summary_seg["trip_lift_pct_vs_avg_window"] = (summary_seg["trips_multiplier"] - 1.0) * 100.0
+
+# Price & speed indices
+summary_seg["surge_index_fare_per_mile_med"] = (
+    summary_seg["med_fare_per_mile_event"] / summary_seg["med_fare_per_mile_baseline"]
+)
+summary_seg["mph_change_med"] = summary_seg["med_mph_event"] - summary_seg["med_mph_baseline"]
+
+# Optional robust (median-window) versions
+summary_seg["trips_multiplier_vs_median_window"] = summary_seg["rows_event"] / summary_seg["rows_baseline_median_win"]
+summary_seg["trip_lift_pct_vs_median_window"] = (summary_seg["trips_multiplier_vs_median_window"] - 1.0) * 100.0
+
+print("\n Segment summary (arrivals_pre / departures_post)")
+pd.set_option("display.max_columns", None)
+display(summary_seg)
+```
   
