@@ -512,7 +512,7 @@ print("\n Segment summary (arrivals_pre / departures_post)")
 pd.set_option("display.max_columns", None)
 display(summary_seg)
 ```
- 5. Findings (Segment Summary)
+## 5. Findings (Segment Summary)
 ---
 ### 1. Mexico v Bolivia (May 31, 2024, Soldier Field)
 - **Arrivals (before match):**
