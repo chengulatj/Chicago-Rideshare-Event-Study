@@ -153,14 +153,14 @@ Notes:
 - `rows, offset = [], 0` — an accumulator for pages, and the starting offset.
 
 ### Count for progress (Optional)
-    ```python
+```python
     total = int(client.get(DATASET, select="count(1)", where=WHERE_FINAL)[0]["count"])
-    ```
+```
 - Asks the API for a row count that match your WHERE_FINAL filter (CA 33 + month/year).
 - If it fails, `total = None` and you’ll still stream pages—just without a progress denominator.
   
 ### Paged fetch loop (stable ordering)
-    ```python
+```python
     batch = client.get(
     DATASET,
     where=WHERE_FINAL,
@@ -168,7 +168,7 @@ Notes:
     offset=offset,
     order=":id"
     )
-    ```
+```
 - Pulls one page of up to 50k rows that satisfy your filter.
 - `order=":id"` enforces a stable order across pages, preventing skips/duplicates while paginating.
 - On `ReadTimeout` / `ConnectionError`, it sleeps 1s and retries the same page once.
@@ -180,10 +180,9 @@ Notes:
 - Print progress: either `offset/total` (capped with `min(offset, total))` or just offset if total is unknown.
 
 ### Building a dataframe
-    ```python
+```python
     df = pd.DataFrame.from_records(rows)
-    ```
-    
+```
 - Turns the list of dicts (each record = one trip) into a tabular `DataFrame`.
 
 ### Enforce “touches CA 33” client-side (belt & suspenders)
